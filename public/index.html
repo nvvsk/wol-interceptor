@@ -122,7 +122,15 @@
     // Capitalize the first letter for use at the start of a sentence.
     const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 
+    // Source URL we redirect back to once the origin is awake. nginx passes
+    // it as ?from=<host> when it redirects here from the origin's error_page.
+    // Falls back to the current host (useful when the page is hit directly).
+    const params = new URLSearchParams(window.location.search);
+    const fromHost = params.get('from') || window.location.host;
+    const sourceUrl = `${window.location.protocol}//${fromHost}/`;
+
     let pollTimer = null;
+    let redirecting = false;
 
     function fmtElapsed(ms) {
       if (ms == null) return '';
@@ -135,7 +143,6 @@
       const { up, phase, sinceWakeMs, arp } = data;
       const label = data.label || 'device';
       const Label = cap(label);
-      const targetUrl = window.location.host;
 
       els.meta.textContent = '';
 
@@ -143,12 +150,15 @@
         els.dot.className = 'dot ok';
         els.status.textContent = `${Label} is up — redirecting…`;
         els.title.textContent = `${Label} is up`;
-        els.subtitle.textContent = `Heading to ${targetUrl}…`;
+        els.subtitle.textContent = `Heading to ${fromHost}…`;
         els.btn.disabled = true;
         els.btn.textContent = 'Connected';
         els.elapsed.textContent = '';
         els.banner.className = 'banner';
-        setTimeout(() => location.reload(), 800);
+        // Stop polling so no in-flight fetch lingers across the navigation.
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        redirecting = true;
+        setTimeout(() => { window.location.href = sourceUrl; }, 800);
         return;
       }
 
@@ -157,7 +167,7 @@
           els.dot.className = 'dot';
           els.status.textContent = 'Asleep';
           els.title.textContent = `${Label} is asleep`;
-          els.subtitle.textContent = `Wake it up to access ${targetUrl}`;
+          els.subtitle.textContent = `Wake it up to access ${fromHost}`;
           els.btn.disabled = false;
           els.btn.className = '';
           els.btn.textContent = `Wake up`;
@@ -215,11 +225,13 @@
     }
 
     async function poll() {
+      if (redirecting) return;
       try {
         const r = await fetch('/status', { cache: 'no-store' });
         const data = await r.json();
         render(data);
       } catch (e) {
+        if (redirecting) return;
         els.dot.className = 'dot err';
         els.status.textContent = 'Gateway unreachable';
         els.banner.className = 'banner err show';
