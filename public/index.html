@@ -124,9 +124,13 @@
 
     // Source URL we redirect back to once the origin is awake. nginx passes
     // it as ?from=<host> when it redirects here from the origin's error_page.
-    // Falls back to the current host (useful when the page is hit directly).
+    // If the param is missing or points back at the wake host itself, treat
+    // this as a direct visit — show status only, never auto-redirect (would
+    // otherwise loop the page into itself).
     const params = new URLSearchParams(window.location.search);
-    const fromHost = params.get('from') || window.location.host;
+    const rawFrom = params.get('from');
+    const fromHost = rawFrom || window.location.host;
+    const standalone = !rawFrom || rawFrom === window.location.host;
     const sourceUrl = `${window.location.protocol}//${fromHost}/`;
 
     let pollTimer = null;
@@ -148,13 +152,21 @@
 
       if (up) {
         els.dot.className = 'dot ok';
-        els.status.textContent = `${Label} is up — redirecting…`;
         els.title.textContent = `${Label} is up`;
-        els.subtitle.textContent = `Heading to ${fromHost}…`;
         els.btn.disabled = true;
-        els.btn.textContent = 'Connected';
+        els.btn.textContent = standalone ? 'All set' : 'Connected';
         els.elapsed.textContent = '';
         els.banner.className = 'banner';
+
+        if (standalone) {
+          // Direct visit — no source to bounce back to. Just show success.
+          els.status.textContent = `${Label} is up`;
+          els.subtitle.textContent = 'You can close this tab.';
+          return;
+        }
+
+        els.status.textContent = `${Label} is up — redirecting…`;
+        els.subtitle.textContent = `Heading to ${fromHost}…`;
         // Stop polling so no in-flight fetch lingers across the navigation.
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         redirecting = true;
@@ -167,7 +179,9 @@
           els.dot.className = 'dot';
           els.status.textContent = 'Asleep';
           els.title.textContent = `${Label} is asleep`;
-          els.subtitle.textContent = `Wake it up to access ${fromHost}`;
+          els.subtitle.textContent = standalone
+            ? `Wake up the ${label}`
+            : `Wake it up to access ${fromHost}`;
           els.btn.disabled = false;
           els.btn.className = '';
           els.btn.textContent = `Wake up`;
