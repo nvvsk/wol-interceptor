@@ -23,6 +23,7 @@ const BROADCAST = process.env.WOL_BROADCAST || '255.255.255.255';
 const TCP_PROBE_TIMEOUT_MS = 1500;
 const WAKE_GRACE_MS = 90_000;         // 0–90s after WoL: normal wake window
 const OFFLINE_THRESHOLD_MS = 180_000; // >180s with no ARP/TCP: declare offline
+const WAKE_ABANDON_MS = 10 * 60_000;  // >10min: forget the attempt; reset UI to idle
 
 // In-memory wake state. Single-process, single-target — resets on restart,
 // which is the right semantics.
@@ -131,9 +132,18 @@ app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
 
 app.get('/status', async (_req, res) => {
   const up = await tcpProbe(TARGET_HOST, TARGET_PORT);
-  const sinceWakeMs = wakeState.lastWakeAt
+  let sinceWakeMs = wakeState.lastWakeAt
     ? Date.now() - wakeState.lastWakeAt
     : null;
+
+  // Forget stale wake attempts so the UI stops showing red forever. After
+  // the abandon window, /status returns phase: 'idle' until the user
+  // explicitly triggers another /wake.
+  if (!up && sinceWakeMs != null && sinceWakeMs > WAKE_ABANDON_MS) {
+    wakeState.lastWakeAt = 0;
+    wakeState.lastWakeOutcome = null;
+    sinceWakeMs = null;
+  }
 
   // Only run the ARP probe when needed to disambiguate state — avoids spawning
   // `ping`/`ip` every 3 seconds when the target is up or idle.
