@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+.env
+
+# Contains NAS MAC / host — keep out of normal commits.
+# Use `git add -f ecosystem.config.js` to force-commit when needed.
+ecosystem.config.js

@@ -1,0 +1,12 @@
+{
+  "name": "wol-interceptor",
+  "version": "1.0.0",
+  "description": "An nginx fallback that wakes a Wake-on-LAN device on demand.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

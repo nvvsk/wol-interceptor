@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Waking…</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d12;
+      --panel: #141821;
+      --border: #1f2535;
+      --text: #e6e8ee;
+      --muted: #8b93a7;
+      --accent: #5b8def;
+      --accent-hover: #7aa1ff;
+      --ok: #4ade80;
+      --warn: #f59e0b;
+      --err: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    body { display: grid; place-items: center; padding: 24px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 32px;
+      width: min(460px, 100%);
+      box-shadow: 0 24px 60px rgba(0,0,0,0.4);
+      text-align: center;
+    }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+    .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+
+    .pill {
+      display: inline-flex; align-items: center;
+      padding: 6px 14px; border-radius: 999px;
+      background: #0f1320; border: 1px solid var(--border);
+      font-size: 13px; color: var(--muted);
+      margin-bottom: 24px;
+    }
+    .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--muted); margin-right: 8px;
+    }
+    .dot.pulse { animation: pulse 1.2s ease-in-out infinite; }
+    .dot.ok    { background: var(--ok); }
+    .dot.warn  { background: var(--warn); }
+    .dot.err   { background: var(--err); }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; transform: scale(0.85); }
+      50%      { opacity: 1;   transform: scale(1.1); }
+    }
+
+    button {
+      background: var(--accent); color: white;
+      border: 0; border-radius: 10px;
+      padding: 14px 22px; font-size: 15px; font-weight: 600;
+      cursor: pointer; width: 100%;
+      transition: background 120ms ease;
+    }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { background: #2a3142; cursor: not-allowed; color: var(--muted); }
+    button.danger { background: #3a2a32; color: var(--err); }
+    button.danger:hover:not(:disabled) { background: #4a3540; }
+
+    .elapsed { margin-top: 14px; font-size: 13px; color: var(--muted); min-height: 1.4em; }
+    .meta {
+      margin-top: 18px; font-size: 12px; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      line-height: 1.6;
+    }
+    .banner {
+      margin: 0 0 20px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      text-align: left;
+      display: none;
+    }
+    .banner.warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); color: #fde2a4; }
+    .banner.err  { background: rgba(239,68,68,0.08);  border: 1px solid rgba(239,68,68,0.3);  color: #fdb1b1; }
+    .banner.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1 id="title">Waking…</h1>
+    <p class="sub" id="subtitle">Checking status…</p>
+
+    <div class="pill">
+      <span class="dot" id="dot"></span>
+      <span id="status-text">Checking…</span>
+    </div>
+
+    <div class="banner" id="banner"></div>
+
+    <button id="wake-btn">Wake up</button>
+
+    <div class="elapsed" id="elapsed"></div>
+    <div class="meta" id="meta"></div>
+  </div>
+
+  <script>
+    const els = {
+      title:    document.getElementById('title'),
+      subtitle: document.getElementById('subtitle'),
+      dot:      document.getElementById('dot'),
+      status:   document.getElementById('status-text'),
+      btn:      document.getElementById('wake-btn'),
+      elapsed:  document.getElementById('elapsed'),
+      meta:     document.getElementById('meta'),
+      banner:   document.getElementById('banner'),
+    };
+
+    // Capitalize the first letter for use at the start of a sentence.
+    const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+
+    let pollTimer = null;
+
+    function fmtElapsed(ms) {
+      if (ms == null) return '';
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+    }
+
+    function render(data) {
+      const { up, phase, sinceWakeMs, arp } = data;
+      const label = data.label || 'device';
+      const Label = cap(label);
+      const targetUrl = window.location.host;
+
+      els.meta.textContent = '';
+
+      if (up) {
+        els.dot.className = 'dot ok';
+        els.status.textContent = `${Label} is up — redirecting…`;
+        els.title.textContent = `${Label} is up`;
+        els.subtitle.textContent = `Heading to ${targetUrl}…`;
+        els.btn.disabled = true;
+        els.btn.textContent = 'Connected';
+        els.elapsed.textContent = '';
+        els.banner.className = 'banner';
+        setTimeout(() => location.reload(), 800);
+        return;
+      }
+
+      switch (phase) {
+        case 'idle':
+          els.dot.className = 'dot';
+          els.status.textContent = 'Asleep';
+          els.title.textContent = `${Label} is asleep`;
+          els.subtitle.textContent = `Wake it up to access ${targetUrl}`;
+          els.btn.disabled = false;
+          els.btn.className = '';
+          els.btn.textContent = `Wake up`;
+          els.elapsed.textContent = '';
+          els.banner.className = 'banner';
+          break;
+
+        case 'waking':
+          els.dot.className = 'dot pulse warn';
+          els.status.textContent = 'Waking…';
+          els.title.textContent = `Waking the ${label}`;
+          els.subtitle.textContent = 'Magic packet sent — give it a moment.';
+          els.btn.disabled = true;
+          els.btn.textContent = 'Waking…';
+          els.elapsed.textContent = `Elapsed: ${fmtElapsed(sinceWakeMs)}`;
+          els.banner.className = 'banner';
+          break;
+
+        case 'waking_slow':
+          els.dot.className = 'dot pulse warn';
+          els.status.textContent = 'Still waking…';
+          els.title.textContent = 'Still waking';
+          els.subtitle.textContent = `${Label} is on the network but isn't answering yet.`;
+          els.btn.disabled = true;
+          els.btn.textContent = 'Waking…';
+          els.elapsed.textContent = `Elapsed: ${fmtElapsed(sinceWakeMs)}`;
+          els.banner.className = 'banner warn show';
+          els.banner.textContent =
+            arp && arp.present
+              ? `${Label} found — finishing startup. This can take a minute or two after a cold boot.`
+              : 'Taking longer than usual. Hang tight…';
+          break;
+
+        case 'likely_offline':
+          els.dot.className = 'dot err';
+          els.status.textContent = 'No response';
+          els.title.textContent = `${Label} isn't responding`;
+          els.subtitle.textContent = `It looks like the ${label} is powered off or unreachable.`;
+          els.btn.disabled = false;
+          els.btn.className = 'danger';
+          els.btn.textContent = 'Try again';
+          els.elapsed.textContent = `Last attempt: ${fmtElapsed(sinceWakeMs)} ago`;
+          els.banner.className = 'banner err show';
+          els.banner.textContent =
+            'Things to check: power, the cable into the back of the device, and the surge protector / wall switch.';
+          break;
+
+        case 'up':
+          break;
+
+        default:
+          els.dot.className = 'dot';
+          els.status.textContent = phase || 'Unknown';
+      }
+    }
+
+    async function poll() {
+      try {
+        const r = await fetch('/status', { cache: 'no-store' });
+        const data = await r.json();
+        render(data);
+      } catch (e) {
+        els.dot.className = 'dot err';
+        els.status.textContent = 'Gateway unreachable';
+        els.banner.className = 'banner err show';
+        els.banner.textContent = "Can't reach the wake service right now. Try refreshing in a moment.";
+      }
+    }
+
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(poll, 3000);
+    }
+
+    els.btn.addEventListener('click', async () => {
+      els.btn.disabled = true;
+      els.btn.textContent = 'Sending magic packet…';
+      try {
+        const r = await fetch('/wake', { method: 'POST' });
+        if (!r.ok) throw new Error(`wake http ${r.status}`);
+        poll();
+      } catch (e) {
+        els.dot.className = 'dot err';
+        els.status.textContent = 'Wake failed';
+        els.btn.disabled = false;
+        els.btn.textContent = 'Wake up';
+        els.banner.className = 'banner err show';
+        els.banner.textContent = `Wake request failed: ${e.message}`;
+      }
+    });
+
+    poll();
+    startPolling();
+  </script>
+</body>
+</html>
