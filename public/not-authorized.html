@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Not authorized</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d12;
+      --panel: #141821;
+      --border: #1f2535;
+      --text: #e6e8ee;
+      --muted: #8b93a7;
+      --err: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: var(--bg); color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    body { display: grid; place-items: center; padding: 24px; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 32px;
+      width: min(460px, 100%);
+      box-shadow: 0 24px 60px rgba(0,0,0,0.4);
+      text-align: center;
+    }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 600; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+    .banner {
+      margin: 0 0 20px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: rgba(239,68,68,0.08);
+      border: 1px solid rgba(239,68,68,0.3);
+      color: #fdb1b1;
+      font-size: 13px;
+      text-align: left;
+    }
+    a.btn {
+      display: inline-block;
+      background: #2a3142; color: var(--text);
+      text-decoration: none;
+      border-radius: 10px;
+      padding: 12px 20px; font-size: 14px; font-weight: 600;
+    }
+    a.btn:hover { background: #354160; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>You don't have access</h1>
+    <p class="sub">Your account isn't permitted to wake this device.</p>
+    <div class="banner">
+      Access is limited to a specific team. If you believe you should have
+      access, ask the person who manages this gateway to add you.
+    </div>
+    <a class="btn" href="/auth/login">Sign in as someone else</a>
+  </div>
+</body>
+</html>

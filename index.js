@@ -1,4 +1,7 @@
 const express = require('express');
+const session = require('express-session');
+const MemoryStore = require('memorystore')(session);
+const { Issuer, generators } = require('openid-client');
 const dgram = require('dgram');
 const net = require('net');
 const path = require('path');
@@ -20,6 +23,17 @@ const TARGET_MAC = required('TARGET_MAC').toLowerCase();
 const TARGET_LABEL = process.env.TARGET_LABEL || 'device';
 const BROADCAST = process.env.WOL_BROADCAST || '255.255.255.255';
 
+const OIDC_ISSUER_URL = required('OIDC_ISSUER_URL');
+const OIDC_CLIENT_ID = required('OIDC_CLIENT_ID');
+const OIDC_CLIENT_SECRET = required('OIDC_CLIENT_SECRET');
+const OIDC_REDIRECT_URI = required('OIDC_REDIRECT_URI');
+const OIDC_ALLOWED_GROUP = required('OIDC_ALLOWED_GROUP');
+const OIDC_GROUP_CLAIM = process.env.OIDC_GROUP_CLAIM || 'groups';
+const OIDC_SCOPES = process.env.OIDC_SCOPES || 'openid profile email';
+const SESSION_SECRET = required('SESSION_SECRET');
+const SESSION_TTL_MS = parseInt(process.env.SESSION_TTL_MS || `${8 * 60 * 60 * 1000}`, 10);
+const COOKIE_SECURE = (process.env.COOKIE_SECURE || 'true') === 'true';
+
 const TCP_PROBE_TIMEOUT_MS = 1500;
 const WAKE_GRACE_MS = 90_000;         // 0–90s after WoL: normal wake window
 const OFFLINE_THRESHOLD_MS = 180_000; // >180s with no ARP/TCP: declare offline
@@ -31,6 +45,38 @@ const wakeState = {
   lastWakeAt: 0,          // ms epoch of most recent /wake
   lastWakeOutcome: null,  // 'pending' | 'success' | 'no_response'
 };
+
+// OIDC client lifecycle. Discovery is async and the IdP can be unreachable at
+// startup or fail mid-session — keep state so handlers can degrade gracefully
+// instead of leaking stack traces to users.
+const oidcState = {
+  client: null,
+  ready: false,
+  lastError: null,
+};
+
+let oidcRetryTimer = null;
+
+async function initOidc() {
+  try {
+    const issuer = await Issuer.discover(OIDC_ISSUER_URL);
+    oidcState.client = new issuer.Client({
+      client_id: OIDC_CLIENT_ID,
+      client_secret: OIDC_CLIENT_SECRET,
+      redirect_uris: [OIDC_REDIRECT_URI],
+      response_types: ['code'],
+    });
+    oidcState.ready = true;
+    oidcState.lastError = null;
+    console.log(`[oidc] discovery ok: ${issuer.issuer}`);
+  } catch (err) {
+    oidcState.ready = false;
+    oidcState.lastError = err.message;
+    console.error(`[oidc] discovery failed: ${err.message} — retrying in 30s`);
+    if (oidcRetryTimer) clearTimeout(oidcRetryTimer);
+    oidcRetryTimer = setTimeout(initOidc, 30_000);
+  }
+}
 
 function buildMagicPacket(mac) {
   const macBytes = mac.split(/[:-]/).map((b) => parseInt(b, 16));
@@ -125,12 +171,180 @@ function computePhase({ up, arpPresent, sinceWakeMs }) {
   return 'waking_slow';
 }
 
+function extractGroups(source) {
+  if (!source) return [];
+  const raw = source[OIDC_GROUP_CLAIM];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') return raw.split(/[,\s]+/).filter(Boolean);
+  return [];
+}
+
+function isAllowed(groups) {
+  return Array.isArray(groups) && groups.includes(OIDC_ALLOWED_GROUP);
+}
+
+// Treat the request as same-origin if Origin (or Referer for older clients)
+// matches the canonical host we serve from. This is belt-and-braces on top of
+// the SameSite=Lax cookie — without it a stolen cookie from a phishing redirect
+// can't be replayed against /wake.
+function isSameOrigin(req) {
+  const host = req.get('Host');
+  if (!host) return false;
+  const proto = req.get('X-Forwarded-Proto') || req.protocol || 'https';
+  const expectedOrigin = `${proto}://${host}`;
+  const origin = req.get('Origin');
+  if (origin) return origin === expectedOrigin;
+  // Some browsers omit Origin on same-origin same-method requests — fall back
+  // to Referer if it's present.
+  const referer = req.get('Referer');
+  if (referer) {
+    try {
+      const url = new URL(referer);
+      return `${url.protocol}//${url.host}` === expectedOrigin;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function requireAuthHtml(req, res, next) {
+  if (req.session && req.session.user) return next();
+  // Stash where the user was trying to go and bounce them through SSO.
+  if (req.originalUrl && req.originalUrl.startsWith('/') && !req.originalUrl.startsWith('/auth/')) {
+    req.session.returnTo = req.originalUrl;
+  }
+  return res.redirect('/auth/login');
+}
+
+function requireAuthJson(req, res, next) {
+  if (req.session && req.session.user) return next();
+  return res.status(401).json({ ok: false, error: 'auth_required' });
+}
+
+function requireSameOrigin(req, res, next) {
+  if (isSameOrigin(req)) return next();
+  return res.status(403).json({ ok: false, error: 'forbidden_origin' });
+}
+
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1); // nginx is in front of us
 
+app.use(
+  session({
+    name: 'wol.sid',
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    rolling: true,
+    store: new MemoryStore({ checkPeriod: 60 * 60 * 1000 }),
+    cookie: {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: COOKIE_SECURE,
+      maxAge: SESSION_TTL_MS,
+    },
+  })
+);
+
+// Liveness probe — must remain public so external monitors can hit it.
 app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
 
-app.get('/status', async (_req, res) => {
+// --- OIDC routes -----------------------------------------------------------
+
+function sendSsoError(res, status, reason) {
+  console.warn(`[oidc] sso-error (${reason})`);
+  res.status(status).sendFile(path.join(__dirname, 'public', 'sso-error.html'));
+}
+
+app.get('/auth/login', async (req, res) => {
+  if (!oidcState.ready) return sendSsoError(res, 503, 'not_ready');
+  try {
+    const codeVerifier = generators.codeVerifier();
+    const codeChallenge = generators.codeChallenge(codeVerifier);
+    const state = generators.state();
+    const nonce = generators.nonce();
+    req.session.oidc = { codeVerifier, state, nonce };
+    const url = oidcState.client.authorizationUrl({
+      scope: OIDC_SCOPES,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+      state,
+      nonce,
+    });
+    res.redirect(url);
+  } catch (err) {
+    sendSsoError(res, 502, `login_error: ${err.message}`);
+  }
+});
+
+app.get('/auth/callback', async (req, res) => {
+  if (!oidcState.ready) return sendSsoError(res, 503, 'not_ready');
+  const pending = req.session.oidc;
+  if (!pending) return sendSsoError(res, 400, 'missing_state');
+  try {
+    const params = oidcState.client.callbackParams(req);
+    const tokenSet = await oidcState.client.callback(OIDC_REDIRECT_URI, params, {
+      code_verifier: pending.codeVerifier,
+      state: pending.state,
+      nonce: pending.nonce,
+    });
+    const claims = tokenSet.claims();
+
+    let groups = extractGroups(claims);
+    if (!isAllowed(groups) && tokenSet.access_token) {
+      // Some IdPs (Entra in particular) omit groups from the id_token when
+      // the user is in too many groups — fall back to userinfo before giving
+      // up.
+      try {
+        const userinfo = await oidcState.client.userinfo(tokenSet.access_token);
+        groups = extractGroups(userinfo);
+      } catch (e) {
+        console.warn(`[oidc] userinfo failed: ${e.message}`);
+      }
+    }
+
+    if (!isAllowed(groups)) {
+      console.warn(`[oidc] forbidden user sub=${claims.sub} groups=${JSON.stringify(groups)}`);
+      req.session.destroy(() => {});
+      return res.status(403).sendFile(path.join(__dirname, 'public', 'not-authorized.html'));
+    }
+
+    const returnTo =
+      req.session.returnTo && req.session.returnTo.startsWith('/')
+        ? req.session.returnTo
+        : '/';
+
+    // Drop OIDC scratch state; keep only what we need for the session.
+    req.session.regenerate((err) => {
+      if (err) return sendSsoError(res, 500, `regen: ${err.message}`);
+      req.session.user = {
+        sub: claims.sub,
+        name: claims.name || claims.preferred_username || claims.email || claims.sub,
+        email: claims.email || null,
+      };
+      res.redirect(returnTo);
+    });
+  } catch (err) {
+    sendSsoError(res, 502, `callback_error: ${err.message}`);
+  }
+});
+
+app.post('/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.clearCookie('wol.sid');
+    res.json({ ok: true });
+  });
+});
+
+app.get('/auth/me', requireAuthJson, (req, res) => {
+  res.json({ user: req.session.user });
+});
+
+// --- Protected app routes --------------------------------------------------
+
+app.get('/status', requireAuthJson, async (_req, res) => {
   const up = await tcpProbe(TARGET_HOST, TARGET_PORT);
   let sinceWakeMs = wakeState.lastWakeAt
     ? Date.now() - wakeState.lastWakeAt
@@ -180,7 +394,7 @@ app.get('/status', async (_req, res) => {
   });
 });
 
-app.post('/wake', async (_req, res) => {
+app.post('/wake', requireAuthJson, requireSameOrigin, async (_req, res) => {
   try {
     await sendWol(TARGET_MAC, BROADCAST);
     wakeState.lastWakeAt = Date.now();
@@ -193,13 +407,16 @@ app.post('/wake', async (_req, res) => {
   }
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Anything else (since nginx routes the original URL through @wake) lands on
-// the wake page.
-app.get('*', (_req, res) => {
+// Everything else (including the wake page) requires auth — falling through
+// without it triggers the SSO redirect from requireAuthHtml, which is the
+// "auto-redirect to SSO" behavior the user expects. The error HTML pages
+// (sso-error / not-authorized) are sent directly from the auth handlers via
+// res.sendFile, so there's no public static route to leak through.
+app.get('*', requireAuthHtml, (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
+initOidc();
 
 app.listen(PORT, () => {
   console.log(

@@ -87,10 +87,26 @@
     .banner.warn { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.3); color: #fde2a4; }
     .banner.err  { background: rgba(239,68,68,0.08);  border: 1px solid rgba(239,68,68,0.3);  color: #fdb1b1; }
     .banner.show { display: block; }
+
+    .user {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 12px; color: var(--muted);
+      margin-bottom: 16px;
+    }
+    .user a {
+      color: var(--muted); text-decoration: none;
+      padding: 4px 8px; border-radius: 6px;
+    }
+    .user a:hover { background: #0f1320; color: var(--text); }
+    .user .who { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   </style>
 </head>
 <body>
   <div class="card">
+    <div class="user">
+      <span class="who" id="who"></span>
+      <a href="#" id="signout">Sign out</a>
+    </div>
     <h1 id="title">Waking…</h1>
     <p class="sub" id="subtitle">Checking status…</p>
 
@@ -117,7 +133,16 @@
       elapsed:  document.getElementById('elapsed'),
       meta:     document.getElementById('meta'),
       banner:   document.getElementById('banner'),
+      who:      document.getElementById('who'),
+      signout:  document.getElementById('signout'),
     };
+
+    // If the server expires our session mid-poll, snap back to SSO so the
+    // user doesn't sit on a broken page. Returning to the current URL keeps
+    // any ?from= param so the post-auth redirect still lands them right.
+    function bounceToLogin() {
+      window.location.href = '/auth/login';
+    }
 
     // Capitalize the first letter for use at the start of a sentence.
     const cap = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
@@ -242,6 +267,7 @@
       if (redirecting) return;
       try {
         const r = await fetch('/status', { cache: 'no-store' });
+        if (r.status === 401) { bounceToLogin(); return; }
         const data = await r.json();
         render(data);
       } catch (e) {
@@ -253,6 +279,23 @@
       }
     }
 
+    async function loadUser() {
+      try {
+        const r = await fetch('/auth/me', { cache: 'no-store' });
+        if (r.status === 401) { bounceToLogin(); return; }
+        const data = await r.json();
+        if (data && data.user) {
+          els.who.textContent = data.user.name || data.user.email || '';
+        }
+      } catch { /* leave header blank; status poll will surface gateway errors */ }
+    }
+
+    els.signout.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      try { await fetch('/auth/logout', { method: 'POST' }); } catch {}
+      window.location.href = '/auth/login';
+    });
+
     function startPolling() {
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(poll, 3000);
@@ -263,6 +306,7 @@
       els.btn.textContent = 'Sending magic packet…';
       try {
         const r = await fetch('/wake', { method: 'POST' });
+        if (r.status === 401) { bounceToLogin(); return; }
         if (!r.ok) throw new Error(`wake http ${r.status}`);
         poll();
       } catch (e) {
@@ -275,6 +319,7 @@
       }
     });
 
+    loadUser();
     poll();
     startPolling();
   </script>
